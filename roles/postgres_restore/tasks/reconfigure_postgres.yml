@@ -1,0 +1,8 @@
+- name: Replace restored postgres configs
+  command: mv /data/postgresql.conf /data/postgresql.conf.restored
+
+# Use inventory_hostname to reassign the new hostname inside 
+# postgresql.conf and related files.
+
+# Redo ssl certs with new hostname
+

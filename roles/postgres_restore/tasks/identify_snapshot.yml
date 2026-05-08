@@ -1,0 +1,15 @@
+- name: Identify latest production snapshot
+  shell: >
+    gcloud compute snapshots list
+    --filter="name~'prod-postgres'"
+    --sort-by=~creationTimestamp
+    --limit=1
+    --format="value(name)"
+  register: latest_snapshot
+
+- debug:
+    msg: "Latest snapshot identified: {{ latest_snapshot.stdout }}"
+
+- name: Identify attached data disk
+  shell: lsblk -o NAME,MOUNTPOINT | grep /data
+  register: data_disk    

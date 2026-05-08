@@ -1,0 +1,14 @@
+- name: Start PostgreSQL
+  service:
+    name: postgresql
+    state: started
+
+- name: Wait for PostgreSQL port
+  wait_for:
+    port: 5432
+    timeout: 30
+
+# TBD:
+- name: Verify PostgreSQL readiness
+  shell: pg_isready
+  register: pg_health    

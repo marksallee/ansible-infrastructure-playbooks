@@ -1,0 +1,29 @@
+---
+
+# Restore production snapshot onto dev postgres server using Ansible + gcloud tools
+
+#1. Identify latest production snapshot using gcloud and formatting
+- name: Restore PostgreSQL snapshot to target environment 
+  hosts: db_hosts 
+  become: true 
+
+  vars: 
+    target_environment: dev
+
+  roles:
+    - postgres_restore
+
+
+#2. Identify the disk name on the target machine that you want to delete and replace
+
+#3. Stop postgres on the target machine and unmount the data disk (or shut it down).
+#3.1 if rebooting, et postgres to NOT auto-start on boot
+
+#4. Restore the snapshot to disk
+
+#5. when that succeeds, restart the machine or restart postgres service
+
+#6. Rerun some config on the postgres machine to rename postgresql.conf, postgresql.auto.conf to 
+#match the new machine name
+
+#7. Restart postgresql service and do health checks

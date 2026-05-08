@@ -1,0 +1,16 @@
+---
+- name: Identify latest production snapshot
+  import_tasks: identify_snapshot.yml
+
+- name: Stop PostgreSQL and unmount disk
+  import_tasks: stop_postgres.yml
+
+- name: Restore snapshot and attach replacement disk
+  import_tasks: restore_disk.yml
+
+- name: Reconfigure PostgreSQL for target environment
+  import_tasks: reconfigure_postgres.yml
+
+- name: Restart PostgreSQL and run health checks
+  import_tasks: health_checks.yml
+

@@ -1,0 +1,16 @@
+- name: Stop PostgreSQL
+  service:
+    name: postgresql
+    state: stopped
+
+- name: Wait for postgres shutdown
+  wait_for:
+    path: /var/run/postgresql/.s.PGSQL.5432
+    state: absent
+
+# or use 'lsof /data' here
+
+- name: Unmount data disk
+  mount:
+    path: /data
+    state: unmounted

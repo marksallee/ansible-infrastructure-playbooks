@@ -1,0 +1,10 @@
+- name: Create replacement disk from snapshot
+  shell: >
+    gcloud compute disks create {{ replacement_disk_name }}
+    --source-snapshot={{ latest_snapshot.stdout }}
+    --zone={{ gcp_zone }}
+
+# attach disk
+
+# remount /data
+
