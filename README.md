@@ -12,22 +12,24 @@ Linux administration
 
 
 ## Repository Structure
-inventory/
-  dev/
-  staging/
-  prod/
+```
+inventory/  
+  dev/  
+  staging/  
+  prod/  
 
-playbooks/
-  postgres/
-  gcp/
-  system/
+playbooks/  
+  postgres/  
+  gcp/  
+  system/  
 
-roles/
-  postgres/
-  common/
-  monitoring/
+roles/  
+  postgres/  
+  common/  
+  monitoring/  
 
 docs/
+```
 
 ## Goal
 Restore postgres data from production onto a dev environment so the developers can test with recent data.
