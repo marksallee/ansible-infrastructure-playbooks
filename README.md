@@ -10,28 +10,14 @@ PostgreSQL
 Google Cloud Platform (GCP)
 Linux administration
 
+See working example playbook + role at:
+  ansible-infrastructure-playbooks/roles/gcp_snapshot_restore/tasks/main.yml with its calling playbook, playbooks/gcp_snapshot_restore.yml.  
 
-## Repository Structure
-```
-inventory/  
-  dev/  
-  staging/  
-  prod/  
-
-playbooks/  
-  postgres/  
-  gcp/  
-  system/  
-
-roles/  
-  postgres/  
-  common/  
-  monitoring/  
-
-docs/
 ```
 
-## Goal
-Restore postgres data from production onto a dev environment so the developers can test with recent data.
+## How this script was used
 
-Most of my recent work has been inside private systems at work, so this repo focuses on recreating and demonstrating the workflows using sanitized examples that could apply generically to other environments.
+- Restore postgres data from production onto a dev environment so the developers can test with recent data.
+
+- Take a snapshot of a postgres disk. Have the option to delete a disk and recreate it from a specific snapshot. Useful for replicating production data on a test system to ensure data recovery and quality. Ensure that postgres works correctly on restart. 
+
