@@ -1,0 +1,40 @@
+---
+# Defaults for gcp_snapshot_restore role
+
+# Action to perform: 'prompt', 'restore', 'snapshot', 'detach', 'destroy', 'delete_snapshot', or 'restart'
+gcp_snapshot_action: prompt
+
+# The system type running on the VM: 'postgres', 'nginx', or 'auto'
+gcp_snapshot_system_type: auto
+
+# The name of the disk to create, snapshot, or destroy
+gcp_snapshot_disk_name: "{{ inventory_hostname }}-data1"
+
+# The name of the snapshot (required for 'snapshot' and 'restore' actions)
+gcp_snapshot_name: ""
+
+# Type of disk: 'pd-ssd' or 'pd-balanced'
+gcp_snapshot_disk_type: pd-balanced
+
+# Size of the disk in GB
+gcp_snapshot_disk_size: 100
+
+# Device name when attaching the disk (e.g., 'data1' or 'root')
+gcp_snapshot_device_name: data1
+
+# Target zone for the VM and disk operations
+gcp_snapshot_zone: "{{ zone | default('us-east1-b') }}"
+
+# KMS Key for disk encryption
+gcp_snapshot_kms_key: "{{ your_kms_key }}"
+
+# PostgreSQL version if system type is postgres
+postgresql_version: 17
+
+# Target VM name
+
+# Whether to shut down the VM entirely when detaching/destroying/restoring
+gcp_snapshot_shutdown_vm: false
+
+project: "{{ your_project_name }}"
+snapshot_keyfile: "{{ your_snapshot_key }}"

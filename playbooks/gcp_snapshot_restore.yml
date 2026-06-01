@@ -1,0 +1,13 @@
+---
+# Playbook to manage GCP Snapshot operations: restore, snapshot, detach, destroy
+# Example usage:
+# ansible-playbook playbooks/gcp_snapshot_restore.yml -l <target_host> -e "gcp_snapshot_action=restore" -e "gcp_snapshot_name=my-snapshot-123"
+
+- name: GCP Snapshot Restore Operations
+  hosts: all
+  gather_facts: false
+  
+  tasks:
+    - name: Run gcp_snapshot_restore role
+      include_role:
+        name: gcp_snapshot_restore

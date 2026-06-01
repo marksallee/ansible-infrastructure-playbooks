@@ -1,0 +1,670 @@
+---
+# Main tasks for gcp_snapshot_restore
+
+- name: Perform GCP Snapshot Restore Actions
+  block:
+
+    # ---------------------------------------------------------
+    # GCP Auth Validation
+    # ---------------------------------------------------------
+    - name: Authenticate with gcloud service account
+      command: >
+        gcloud auth activate-service-account --project="{{ project_id }}" --key-file={{ snapshot_keyfile }}
+      delegate_to: localhost
+      when: snapshot_keyfile is defined and project_id is defined
+
+    # ---------------------------------------------------------
+    # Action Selection (Interactive)
+    # ---------------------------------------------------------
+    - name: Prompt for action selection
+      pause:
+        prompt: |
+          
+          Please select an action to perform:
+          1. Take a snapshot
+          2. Delete a snapshot
+          3. Detach disk
+          4. Destroy disk
+          5. Create new disk from snapshot (restore)
+          6. Restart VM
+          q. Quit
+
+          Enter your choice (1-6, q):
+      register: action_prompt
+      when: gcp_snapshot_action | default('prompt') == 'prompt'
+
+    - name: Set action based on prompt
+      set_fact:
+        gcp_snapshot_action: >-
+          {%- if action_prompt.user_input == '1' -%}snapshot
+          {%- elif action_prompt.user_input == '2' -%}delete_snapshot
+          {%- elif action_prompt.user_input == '3' -%}detach
+          {%- elif action_prompt.user_input == '4' -%}destroy
+          {%- elif action_prompt.user_input == '5' -%}restore
+          {%- elif action_prompt.user_input == '6' -%}restart
+          {%- elif action_prompt.user_input | lower == 'q' -%}quit
+          {%- else -%}invalid
+          {%- endif -%}
+      when: 
+        - gcp_snapshot_action | default('prompt') == 'prompt'
+        - not action_prompt.skipped | default(false)
+
+    - name: Fail if quit or invalid
+      fail:
+        msg: "Quitting or invalid selection chosen."
+      when: gcp_snapshot_action in ['quit', 'invalid']
+
+    - name: "Action: {{ gcp_snapshot_action }}"
+      debug:
+        msg: "Starting {{ gcp_snapshot_action }} process for {{ inventory_hostname }} in zone {{ gcp_snapshot_zone }}"
+
+    # ---------------------------------------------------------
+    # Identify System Type
+    # ---------------------------------------------------------
+    - name: Check if VM is running
+      command: >
+        gcloud compute instances describe {{ inventory_hostname }} --zone={{ gcp_snapshot_zone }} --format="value(status)"
+      delegate_to: localhost
+      register: vm_status
+      ignore_errors: true
+      when: gcp_snapshot_system_type == 'auto'
+
+    - name: Gather service facts to identify system type
+      ansible.builtin.service_facts:
+      register: service_facts_result
+      ignore_errors: true
+      ignore_unreachable: true
+      when: 
+        - gcp_snapshot_system_type == 'auto'
+        - vm_status.stdout | default('') | trim == 'RUNNING'
+
+    - name: Identify system type from facts
+      set_fact:
+        gcp_snapshot_system_type: >-
+          {%- if ansible_facts is defined and ansible_facts.services is defined and ('postgresql-' ~ postgresql_version ~ '.service' in ansible_facts.services) -%}postgres
+          {%- elif ansible_facts is defined and ansible_facts.services is defined and ('nginx.service' in ansible_facts.services) -%}nginx
+          {%- else -%}unknown
+          {%- endif -%}
+      when: 
+        - gcp_snapshot_system_type == 'auto'
+        - not service_facts_result.skipped | default(false)
+        - not service_facts_result.failed | default(false)
+        - not service_facts_result.unreachable | default(false)
+
+    - name: Set system type to unknown if gathering facts failed or skipped
+      set_fact:
+        gcp_snapshot_system_type: 'unknown'
+      when: 
+        - gcp_snapshot_system_type == 'auto'
+        - service_facts_result.skipped | default(false) or service_facts_result.failed | default(false) or service_facts_result.unreachable | default(false)
+
+    - name: Prompt for system type if unknown
+      pause:
+        prompt: |
+          
+          Could not automatically identify the system type (VM might be down or facts unavailable).
+          Please specify the system type:
+          1. postgres
+          2. nginx
+          
+          Enter your choice (1 or 2):
+      register: system_type_prompt
+      when: gcp_snapshot_system_type == 'unknown'
+
+    - name: Set system type from prompt
+      set_fact:
+        gcp_snapshot_system_type: >-
+          {%- if system_type_prompt.user_input == '1' or system_type_prompt.user_input | lower == 'postgres' -%}postgres
+          {%- elif system_type_prompt.user_input == '2' or system_type_prompt.user_input | lower == 'nginx' -%}nginx
+          {%- else -%}unknown
+          {%- endif -%}
+      when: 
+        - system_type_prompt is not skipped
+        - system_type_prompt.user_input is defined
+
+    - name: Fail if system type could not be identified
+      fail:
+        msg: "Invalid system type specified. Must be 'postgres' or 'nginx'."
+      when: gcp_snapshot_system_type not in ['postgres', 'nginx']
+
+    - name: Display identified system type
+      debug:
+        msg: "Identified system type: {{ gcp_snapshot_system_type }}"
+
+    # ---------------------------------------------------------
+    # Delete Snapshot
+    # ---------------------------------------------------------
+    - name: Get the latest snapshot for deletion
+      command: >
+        gcloud compute snapshots list
+        --filter="name~'{{ inventory_hostname }}'"
+        --sort-by=~creationTimestamp
+        --limit=1
+        --format="value(name)"
+      delegate_to: localhost
+      register: latest_snapshot_to_delete
+      when: 
+        - gcp_snapshot_action == 'delete_snapshot'
+        - gcp_snapshot_name == ""
+
+    - name: Prompt for snapshot to delete
+      pause:
+        prompt: |
+          
+          Latest snapshot found: {{ latest_snapshot_to_delete.stdout | default('None') }}
+          Please enter the exact snapshot name you want to delete:
+      register: delete_snapshot_name
+      when: gcp_snapshot_action == 'delete_snapshot'
+
+    - name: Set snapshot name to delete
+      set_fact:
+        gcp_snapshot_name: "{{ delete_snapshot_name.user_input }}"
+      when: 
+        - gcp_snapshot_action == 'delete_snapshot'
+        - not delete_snapshot_name.skipped | default(false)
+        - delete_snapshot_name.user_input is defined
+        - delete_snapshot_name.user_input != ""
+
+    - name: Delete a snapshot
+      command: >
+        gcloud compute snapshots delete {{ gcp_snapshot_name }} --quiet
+      delegate_to: localhost
+      when: gcp_snapshot_action == 'delete_snapshot'
+
+    # ---------------------------------------------------------
+    # Disk Selection (Interactive)
+    # ---------------------------------------------------------
+    - name: Find disks for the VM
+      command: >
+        gcloud compute disks list
+        --filter="name~'^{{ inventory_hostname }}.*'"
+        --format="value(name)"
+      delegate_to: localhost
+      register: found_disks
+
+    - name: Identify the target disk
+      set_fact:
+        identified_disk: >-
+          {%- if gcp_snapshot_device_name == 'data1' -%}
+            {{ found_disks.stdout_lines | select('search', 'data') | list | first | default('') }}
+          {%- else -%}
+            {{ found_disks.stdout_lines | select('search', 'root') | list | first | default('') }}
+          {%- endif -%}
+
+    - name: Prompt for disk confirmation
+      pause:
+        prompt: |
+          
+          Identified disk: {{ identified_disk | default(gcp_snapshot_disk_name) }}
+          Is this the correct disk name to {{ gcp_snapshot_action }}? (yes/no) [yes]
+      register: disk_confirmation
+
+    - name: Set disk name if confirmed
+      set_fact:
+        gcp_snapshot_disk_name: "{{ identified_disk | default(gcp_snapshot_disk_name) }}"
+      when:
+        - not disk_confirmation.skipped | default(false)
+        - disk_confirmation.user_input | default('yes') | lower in ['y', 'yes', '']
+
+    - name: Prompt for custom disk name
+      pause:
+        prompt: "Please enter the exact disk name you want to use:"
+      register: custom_disk_name
+      when:
+        - not disk_confirmation.skipped | default(false)
+        - disk_confirmation.user_input | default('yes') | lower not in ['y', 'yes', '']
+
+    - name: Set custom disk name
+      set_fact:
+        gcp_snapshot_disk_name: "{{ custom_disk_name.user_input }}"
+      when: 
+        - not custom_disk_name.skipped | default(false)
+        - custom_disk_name.user_input is defined
+        - custom_disk_name.user_input != ""
+
+    - name: Fail if no disk name is provided
+      fail:
+        msg: "A disk name is required."
+      when: 
+        - gcp_snapshot_disk_name == ""
+
+    # ---------------------------------------------------------
+    # Snapshot Selection (Interactive)
+    # ---------------------------------------------------------
+    - name: Get the latest snapshot for the VM
+      command: >
+        gcloud compute snapshots list
+        --filter="name~'{{ inventory_hostname }}'"
+        --sort-by=~creationTimestamp
+        --limit=1
+        --format="value(name)"
+      delegate_to: localhost
+      register: latest_snapshot_result
+      when: 
+        - gcp_snapshot_action == 'restore'
+        - gcp_snapshot_name == ""
+
+    - name: Prompt for snapshot confirmation
+      pause:
+        prompt: |
+          
+          Latest snapshot found: {{ latest_snapshot_result.stdout }}
+          Do you want to use this snapshot? (yes/no) [yes]
+      register: snapshot_confirmation
+      when: 
+        - gcp_snapshot_action == 'restore'
+        - gcp_snapshot_name == ""
+        - latest_snapshot_result.stdout is defined
+        - latest_snapshot_result.stdout != ""
+
+    - name: Set snapshot name if confirmed
+      set_fact:
+        gcp_snapshot_name: "{{ latest_snapshot_result.stdout }}"
+      when:
+        - gcp_snapshot_action == 'restore'
+        - gcp_snapshot_name == ""
+        - not snapshot_confirmation.skipped | default(false)
+        - snapshot_confirmation.user_input | default('yes') | lower in ['y', 'yes', '']
+
+    - name: Prompt for custom snapshot name
+      pause:
+        prompt: "Please enter the exact snapshot name you want to use:"
+      register: custom_snapshot_name
+      when:
+        - gcp_snapshot_action == 'restore'
+        - gcp_snapshot_name == ""
+
+    - name: Set custom snapshot name
+      set_fact:
+        gcp_snapshot_name: "{{ custom_snapshot_name.user_input }}"
+      when: 
+        - gcp_snapshot_action == 'restore'
+        - gcp_snapshot_name == ""
+        - not custom_snapshot_name.skipped | default(false)
+        - custom_snapshot_name.user_input is defined
+        - custom_snapshot_name.user_input != ""
+
+    - name: Fail if no snapshot name is provided for restore
+      fail:
+        msg: "A snapshot name is required for the restore action."
+      when: 
+        - gcp_snapshot_action == 'restore'
+        - gcp_snapshot_name == ""
+
+    # ---------------------------------------------------------
+    # Create Snapshot Name Prompt
+    # ---------------------------------------------------------
+    - name: Prompt for new snapshot name
+      pause:
+        prompt: "What name do you want for the new snapshot to be created?"
+      register: new_snapshot_name
+      when: 
+        - gcp_snapshot_action == 'snapshot'
+        - gcp_snapshot_name == ""
+
+    - name: Set new snapshot name
+      set_fact:
+        gcp_snapshot_name: "{{ new_snapshot_name.user_input }}"
+      when: 
+        - gcp_snapshot_action == 'snapshot'
+        - gcp_snapshot_name == ""
+        - not new_snapshot_name.skipped | default(false)
+        - new_snapshot_name.user_input is defined
+        - new_snapshot_name.user_input != ""
+
+    - name: Fail if no snapshot name is provided for snapshot
+      fail:
+        msg: "A snapshot name is required to take a snapshot."
+      when: 
+        - gcp_snapshot_action == 'snapshot'
+        - gcp_snapshot_name == ""
+
+    # ---------------------------------------------------------
+    # Stop Services
+    # ---------------------------------------------------------
+    - name: Prompt before stopping services
+      pause:
+        prompt: |
+          
+          Do you want to stop the {{ gcp_snapshot_system_type }} service on the target system? (yes/no) [yes]
+      register: stop_services_prompt
+      when: 
+        - gcp_snapshot_action in ['restore', 'detach', 'destroy', 'snapshot']
+
+    - name: Stop PostgreSQL (if applicable)
+      become: true
+      systemd:
+        state: stopped
+        name: "postgresql-{{ postgresql_version }}"
+      ignore_errors: true
+      when: 
+        - gcp_snapshot_system_type == 'postgres'
+        - gcp_snapshot_action in ['restore', 'detach', 'destroy', 'snapshot']
+        - not stop_services_prompt.skipped | default(false)
+        - stop_services_prompt.user_input | default('yes') | lower in ['y', 'yes', '']
+
+    - name: Stop nginx (if applicable)
+      become: true
+      systemd:
+        state: stopped
+        name: nginx
+      ignore_errors: true
+      when: 
+        - gcp_snapshot_system_type == 'nginx'
+        - gcp_snapshot_action in ['restore', 'detach', 'destroy', 'snapshot']
+        - not stop_services_prompt.skipped | default(false)
+        - stop_services_prompt.user_input | default('yes') | lower in ['y', 'yes', '']
+
+    - name: Prompt to continue after stopping services
+      pause:
+        prompt: "Services stopped. Check logs to ensure process is stopped, then... Press Enter to continue..."
+      when: 
+        - gcp_snapshot_action in ['restore', 'detach', 'destroy', 'snapshot']
+        - not stop_services_prompt.skipped | default(false)
+        - stop_services_prompt.user_input | default('yes') | lower in ['y', 'yes', '']
+
+    # ---------------------------------------------------------
+    # Shutdown VM (Optional)
+    # ---------------------------------------------------------
+    - name: Prompt before shutting down VM
+      pause:
+        prompt: |
+          
+          Do you want to shut down the VM {{ inventory_hostname }} for a clean state before modifying disks? (yes/no) [no]
+      register: shutdown_vm_prompt
+      when: gcp_snapshot_action in ['restore', 'detach', 'destroy', 'snapshot']
+
+    - name: Update gcp_snapshot_shutdown_vm based on prompt
+      set_fact:
+        gcp_snapshot_shutdown_vm: true
+      when: 
+        - gcp_snapshot_action in ['restore', 'detach', 'destroy', 'snapshot']
+        - not shutdown_vm_prompt.skipped | default(false)
+        - shutdown_vm_prompt.user_input | default('no') | lower in ['y', 'yes']
+
+    - name: Shutdown VM
+      command: >
+        gcloud compute instances stop {{ inventory_hostname }} --zone={{ gcp_snapshot_zone }}
+      delegate_to: localhost
+      when: gcp_snapshot_shutdown_vm|bool
+
+    # ---------------------------------------------------------
+    # Create Snapshot
+    # ---------------------------------------------------------
+    - name: Display gcloud snapshot command
+      debug:
+        msg: >
+          Executing command: gcloud compute disks snapshot {{ gcp_snapshot_disk_name }} --zone={{ gcp_snapshot_zone }} --snapshot-names={{ gcp_snapshot_name }} --description="Snapshot created for {{ inventory_hostname }} by Ansible"
+      when: gcp_snapshot_action == 'snapshot'
+
+    - name: Take snapshot of disk
+      command: >
+        gcloud compute disks snapshot {{ gcp_snapshot_disk_name }} 
+        --zone={{ gcp_snapshot_zone }} 
+        --snapshot-names={{ gcp_snapshot_name }} 
+        --description="Snapshot created for {{ inventory_hostname }} by Ansible"
+      delegate_to: localhost
+      register: snapshot_result
+      when: gcp_snapshot_action == 'snapshot'
+
+    - name: Display snapshot created message
+      debug:
+        msg: "Snapshot {{ gcp_snapshot_name }} created."
+      when: 
+        - gcp_snapshot_action == 'snapshot'
+        - snapshot_result.rc is defined and snapshot_result.rc == 0
+
+    # ---------------------------------------------------------
+    # Detach Disk
+    # ---------------------------------------------------------
+    - name: Confirm VM is shut down before detaching disk
+      pause:
+        prompt: |
+          
+          Please confirm that the VM {{ inventory_hostname }} is fully shut down.
+          Press Enter to proceed with detaching the disk, or Ctrl+C then A to abort.
+      when: gcp_snapshot_action in ['detach', 'destroy']
+    
+    - name: Detach disk
+      command: >
+        gcloud compute instances detach-disk {{ inventory_hostname }} 
+        --zone={{ gcp_snapshot_zone }} 
+        --disk={{ gcp_snapshot_disk_name }}
+      delegate_to: localhost
+      ignore_errors: true
+      when: gcp_snapshot_action in ['detach', 'destroy']
+
+    # ---------------------------------------------------------
+    # Delete Disk
+    # ---------------------------------------------------------
+    - name: Prompt for disk deletion confirmation
+      pause:
+        prompt: |
+          
+          WARNING: You are about to DELETE the disk {{ gcp_snapshot_disk_name }} on {{ inventory_hostname }}!
+          ARE YOU SURE? (Type capital YES to continue)
+      register: delete_confirmation
+      when: gcp_snapshot_action in ['destroy']
+
+    - name: Verify deletion confirmation
+      fail:
+        msg: "Aborting disk deletion as you did not type YES."
+      when: 
+        - gcp_snapshot_action in ['destroy']
+        - not delete_confirmation.skipped | default(false)
+        - delete_confirmation.user_input != 'YES'
+
+    - name: Delete old disk
+      command: >
+        gcloud compute disks delete {{ gcp_snapshot_disk_name }} 
+        --zone={{ gcp_snapshot_zone }} --quiet
+      delegate_to: localhost
+      register: delete_old_disk
+      ignore_errors: true
+      when: gcp_snapshot_action in ['destroy']
+
+    - name: Display disk deleted message
+      debug:
+        msg: "Disk {{ gcp_snapshot_disk_name }} was deleted."
+      when: gcp_snapshot_action in ['destroy'] and delete_old_disk.rc == 0
+
+    # ---------------------------------------------------------
+    # Create New Disk From Snapshot
+    # ---------------------------------------------------------
+    - name: Prompt for disk type
+      pause:
+        prompt: |
+          
+          Choose disk type to create:
+          1. pd-balanced (default)
+          2. pd-ssd
+          
+          Enter your choice (1 or 2) [1]:
+      register: disk_type_prompt
+      when: gcp_snapshot_action == 'restore'
+
+    - name: Set disk type
+      set_fact:
+        gcp_snapshot_disk_type: >-
+          {%- if disk_type_prompt.user_input == '2' -%}pd-ssd
+          {%- else -%}pd-balanced
+          {%- endif -%}
+      when: 
+        - gcp_snapshot_action == 'restore'
+        - not disk_type_prompt.skipped | default(false)
+
+    - name: Create new disk from snapshot
+      command: >
+        gcloud compute disks create {{ gcp_snapshot_disk_name }} 
+        {% if gcp_snapshot_device_name == 'root' %} --size {{ gcp_snapshot_disk_size }} {% endif %}
+        --source-snapshot {{ gcp_snapshot_name }} 
+        --zone={{ gcp_snapshot_zone }} 
+        --type {{ gcp_snapshot_disk_type }} 
+        --kms-key {{ gcp_snapshot_kms_key }}
+      delegate_to: localhost
+      register: create_new_disk
+      when: gcp_snapshot_action == 'restore'
+
+    - name: Display disk created message
+      debug:
+        msg: "Disk {{ gcp_snapshot_disk_name }} is Created."
+      when: gcp_snapshot_action == 'restore' and create_new_disk.rc == 0
+
+    # ---------------------------------------------------------
+    # Attach Disk
+    # ---------------------------------------------------------
+    - name: Attach disk
+      command: >
+        gcloud compute instances attach-disk {{ inventory_hostname }} 
+        --zone={{ gcp_snapshot_zone }} 
+        --disk={{ gcp_snapshot_disk_name }}
+        {% if gcp_snapshot_device_name == 'root' %} --boot {% else %} --device-name {{ gcp_snapshot_device_name }} {% endif %}
+      delegate_to: localhost
+      when: gcp_snapshot_action == 'restore'
+
+    # ---------------------------------------------------------
+    # Start VM
+    # ---------------------------------------------------------
+    - name: Prompt before starting VM
+      pause:
+        prompt: |
+          
+          The VM is currently shut down. Do you want to start the VM {{ inventory_hostname }} now? (yes/no) [yes]
+      register: start_vm_prompt
+      when: 
+        - gcp_snapshot_action in ['restore', 'snapshot']
+        - gcp_snapshot_shutdown_vm|bool
+
+    - name: Stop VM (for restart action)
+      command: >
+        gcloud compute instances stop {{ inventory_hostname }} --zone={{ gcp_snapshot_zone }}
+      delegate_to: localhost
+      ignore_errors: true
+      when: gcp_snapshot_action == 'restart'
+
+    - name: Start VM
+      command: >
+        gcloud compute instances start {{ inventory_hostname }} --zone={{ gcp_snapshot_zone }}
+      delegate_to: localhost
+      when: >
+        gcp_snapshot_action == 'restart' or
+        (gcp_snapshot_action in ['restore', 'snapshot'] and
+         gcp_snapshot_shutdown_vm|bool and
+         not start_vm_prompt.skipped | default(false) and
+         start_vm_prompt.user_input | default('yes') | lower in ['y', 'yes', ''])
+
+    - name: Wait for VM to become reachable
+      wait_for_connection:
+        timeout: 300
+      when: >
+        gcp_snapshot_action == 'restart' or
+        (gcp_snapshot_action in ['restore', 'snapshot'] and
+         gcp_snapshot_shutdown_vm|bool and
+         not start_vm_prompt.skipped | default(false) and
+         start_vm_prompt.user_input | default('yes') | lower in ['y', 'yes', ''])
+
+    # ---------------------------------------------------------
+    # Start Services
+    # ---------------------------------------------------------
+    - name: Start PostgreSQL (if applicable)
+      become: true
+      systemd:
+        state: started
+        name: "postgresql-{{ postgresql_version }}"
+      ignore_errors: true
+      when: 
+        - gcp_snapshot_system_type == 'postgres'
+        - gcp_snapshot_action in ['restore', 'restart']
+
+    - name: Start nginx (if applicable)
+      become: true
+      systemd:
+        state: started
+        name: nginx
+      ignore_errors: true
+      when: 
+        - gcp_snapshot_system_type == 'nginx'
+        - gcp_snapshot_action in ['restore', 'restart']
+
+    # ---------------------------------------------------------
+    # Health Check Services
+    # ---------------------------------------------------------
+    - name: Health check PostgreSQL
+      become: true
+      shell: "systemctl is-active postgresql-{{ postgresql_version }}"
+      register: pg_status
+      retries: 6
+      delay: 10
+      until: pg_status.rc == 0
+      ignore_errors: true
+      when: 
+        - gcp_snapshot_system_type == 'postgres'
+        - gcp_snapshot_action in ['restore', 'restart']
+
+    - name: Verify PostgreSQL is active
+      fail:
+        msg: "PostgreSQL does not appear to be running."
+      when: 
+        - gcp_snapshot_system_type == 'postgres'
+        - gcp_snapshot_action in ['restore', 'restart']
+        - pg_status.rc != 0
+
+    - name: Display PostgreSQL active message
+      debug:
+        msg: "Postgres service is active."
+      when:
+        - gcp_snapshot_system_type == 'postgres'
+        - gcp_snapshot_action in ['restore', 'restart']
+        - pg_status.rc == 0
+
+    - name: Health check nginx
+      become: true
+      command: systemctl is-active nginx
+      register: nginx_status
+      retries: 6
+      delay: 10
+      until: nginx_status.rc == 0
+      ignore_errors: true
+      when: 
+        - gcp_snapshot_system_type == 'nginx'
+        - gcp_snapshot_action in ['restore', 'restart']
+
+    - name: Verify nginx is active
+      fail:
+        msg: "nginx does not appear to be running."
+      when: 
+        - gcp_snapshot_system_type == 'nginx'
+        - gcp_snapshot_action in ['restore', 'restart']
+        - nginx_status.rc != 0
+
+    - name: Display nginx active message
+      debug:
+        msg: "nginx service is active."
+      when:
+        - gcp_snapshot_system_type == 'nginx'
+        - gcp_snapshot_action in ['restore', 'restart']
+        - nginx_status.rc == 0
+
+    # ---------------------------------------------------------
+    # Run Another Command
+    # ---------------------------------------------------------
+    - name: Prompt to run another command
+      pause:
+        prompt: |
+          
+          Do you want to run another command? (yes/no) [no]
+      register: run_another_prompt
+
+    - name: Reset action for next run
+      set_fact:
+        gcp_snapshot_action: 'prompt'
+        gcp_snapshot_name: ""
+      when:
+        - not run_another_prompt.skipped | default(false)
+        - run_another_prompt.user_input | default('no') | lower in ['y', 'yes']
+
+    - name: Run another command
+      include_tasks: main.yml
+      when: 
+        - not run_another_prompt.skipped | default(false)
+        - run_another_prompt.user_input | default('no') | lower in ['y', 'yes']
