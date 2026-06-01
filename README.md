@@ -13,7 +13,7 @@ Linux administration
 See working example playbook + role at:
   ansible-infrastructure-playbooks/roles/gcp_snapshot_restore/tasks/main.yml with its calling playbook, playbooks/gcp_snapshot_restore.yml.  
 
-```
+
 
 ## How this script was used
 
