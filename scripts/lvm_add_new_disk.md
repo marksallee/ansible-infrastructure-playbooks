@@ -23,6 +23,9 @@ sudo rsync -aCpogr /data/ /tmp/data2/ --progress
 Example with Linux "parallel" utility to make it faster:
 
 sudo find /data/ -mindepth 1 -maxdepth 1 | parallel -j 4 sudo rsync -asCpogr {} /tmp/data2/
+
+- check your disk size comparisons here to make sure it matches.  
+
 ```
 
 ### Start removing the too-large disk:  
